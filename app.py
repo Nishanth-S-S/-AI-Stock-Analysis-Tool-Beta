@@ -25,7 +25,7 @@ if 'portfolio' not in st.session_state:
 if 'history' not in st.session_state:
     st.session_state.history = []
 
-st.title("Paper Trading Simulator (Time-Aware)")
+st.title(" 🪐 OrbitTrader AI(AI Trading Simulator)")
 
 # ---- Sidebar Input Section ----
 st.sidebar.header("Input / Upload")
