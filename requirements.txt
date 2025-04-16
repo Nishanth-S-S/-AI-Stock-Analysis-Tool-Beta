@@ -1,8 +1,8 @@
-streamlit>=1.32.0
-yfinance>=0.2.37
-pandas>=1.5.3
-plotly>=5.19.0
-pytz>=2024.1
-requests>=2.31.0
-fpdf>=1.7.2
-google-generativeai>=0.3.2
+streamlit
+yfinance
+pandas
+plotly
+fpdf
+requests
+google-generativeai
+pytz
