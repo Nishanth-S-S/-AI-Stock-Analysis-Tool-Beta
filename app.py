@@ -1,4 +1,3 @@
-# Streamlit Paper Trading Simulator
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -8,14 +7,19 @@ import io
 import plotly.graph_objs as go
 import plotly.express as px
 import pytz
-import yfinance as yf
-import pandas as pd
 import requests
 import google.generativeai as genai
 from datetime import date, timedelta
 from fpdf import FPDF
+import streamlit.components.v1 as components
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import unicodedata
 
 # ---- Session Initialization ----
+if "email" not in st.session_state:
+    st.session_state.email = ""
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = []
 if 'history' not in st.session_state:
@@ -32,6 +36,95 @@ shares = st.sidebar.number_input("Shares", min_value=1, step=1)
 trade_type = st.sidebar.radio("Trade Type", ['Buy', 'Sell'])
 trade_date = st.sidebar.date_input("Trade Date", value=datetime.date.today())
 submit = st.sidebar.button("Submit Trade")
+
+# ---- JSON Import ----
+st.sidebar.subheader("Import from JSON")
+json_file = st.sidebar.file_uploader("Upload JSON file", type=["json"])
+if json_file is not None:
+    try:
+        content = json.load(json_file)
+        for trade in content:
+            if trade['Trade'] == 'Buy':
+                st.session_state.portfolio.append({
+                    'Ticker': trade['Ticker'],
+                    'Shares': trade['Shares'],
+                    'Buy Price': trade['Price'],
+                    'Sector': trade.get('Sector', 'Unknown'),
+                    'Date': trade['Date']
+                })
+            st.session_state.history.append(trade)
+        st.sidebar.success("Trades imported successfully.")
+    except Exception as e:
+        st.sidebar.error(f"Import failed: {e}")
+
+# ---- JSON Export ----
+st.sidebar.subheader("Export to JSON")
+if st.sidebar.button("Download Trades as JSON"):
+    export_data = st.session_state.history
+    json_bytes = io.BytesIO()
+    json_bytes.write(json.dumps(export_data, indent=2).encode('utf-8'))
+    json_bytes.seek(0)
+    st.sidebar.download_button("Click to Download", data=json_bytes, file_name="trades_export.json")
+
+# ---- CSV Upload & Convert to JSON ----
+st.sidebar.subheader("Upload Yahoo CSV and Convert")
+uploaded_csv = st.sidebar.file_uploader("Upload Yahoo Finance CSV", type=["csv"])
+
+def get_sector(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        return stock.info.get("sector", "Unknown")
+    except:
+        return "Unknown"
+
+def convert_yahoo_df_to_trades(df):
+    try:
+        df = df.dropna(subset=["Trade Date"]).copy()
+        df["Trade Date"] = df["Trade Date"].astype(int).astype(str)
+        df["Trade Date"] = pd.to_datetime(df["Trade Date"], format="%Y%m%d").dt.date
+        unique_tickers = df["Symbol"].unique()
+        sector_map = {ticker: get_sector(ticker) for ticker in unique_tickers}
+        df["Sector"] = df["Symbol"].map(sector_map)
+
+        trades = []
+        for _, row in df.iterrows():
+            trades.append({
+                "Date": str(row["Trade Date"]),
+                "Ticker": row["Symbol"],
+                "Trade": "Buy",
+                "Shares": float(row["Quantity"]),
+                "Price": float(row["Purchase Price"]),
+                "Sector": row["Sector"]
+            })
+        return trades
+    except Exception as e:
+        st.sidebar.error(f"❌ Conversion failed: {e}")
+        return []
+
+if uploaded_csv is not None:
+    try:
+        df_csv = pd.read_csv(uploaded_csv)
+        trades_from_csv = convert_yahoo_df_to_trades(df_csv)
+        for trade in trades_from_csv:
+            if trade['Trade'] == 'Buy':
+                st.session_state.portfolio.append({
+                    'Ticker': trade['Ticker'],
+                    'Shares': trade['Shares'],
+                    'Buy Price': trade['Price'],
+                    'Sector': trade.get('Sector', 'Unknown'),
+                    'Date': trade['Date']
+                })
+            st.session_state.history.append(trade)
+        st.sidebar.success("✅ CSV converted and loaded into portfolio!")
+    except Exception as e:
+        st.sidebar.error(f"❌ Upload failed: {e}")
+
+# ---- Email Popover (at bottom of sidebar)
+with st.sidebar.popover("📧 Enter your email for updates"):
+    email_input = st.text_input("Email Address")
+    if st.button("Save Email"):
+        st.session_state.email = email_input
+        st.success("Email saved!")
 
 # ---- Manual Trade Logic ----
 if submit and ticker:
@@ -77,54 +170,22 @@ if submit and ticker:
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
-# ---- JSON Import ----
-st.sidebar.subheader("Import from JSON")
-json_file = st.sidebar.file_uploader("Upload JSON file", type=["json"])
-if json_file is not None:
-    try:
-        content = json.load(json_file)
-        for trade in content:
-            if trade['Trade'] == 'Buy':
-                st.session_state.portfolio.append({
-                    'Ticker': trade['Ticker'],
-                    'Shares': trade['Shares'],
-                    'Buy Price': trade['Price'],
-                    'Sector': trade.get('Sector', 'Unknown'),
-                    'Date': trade['Date']
-                })
-            st.session_state.history.append(trade)
-        st.sidebar.success("Trades imported successfully.")
-    except Exception as e:
-        st.sidebar.error(f"Import failed: {e}")
-
-# ---- JSON Export ----
-st.sidebar.subheader("Export to JSON")
-if st.sidebar.button("Download Trades as JSON"):
-    export_data = st.session_state.history
-    json_bytes = io.BytesIO()
-    json_bytes.write(json.dumps(export_data, indent=2).encode('utf-8'))
-    json_bytes.seek(0)
-    st.sidebar.download_button("Click to Download", data=json_bytes, file_name="trades_export.json")
-
 # ---- Portfolio Table ----
 st.subheader("Current Portfolio")
 if st.session_state.portfolio:
     df = pd.DataFrame(st.session_state.portfolio)
     df = df.groupby(['Ticker', 'Sector']).agg({'Shares': 'sum', 'Buy Price': 'mean'}).reset_index()
-
     current_prices = []
     for ticker in df['Ticker']:
         try:
             current_prices.append(yf.Ticker(ticker).info['regularMarketPrice'])
         except:
             current_prices.append(0)
-
     df['Current Price'] = current_prices
     df['Current Value'] = df['Current Price'] * df['Shares']
     df['Total Cost'] = df['Buy Price'] * df['Shares']
     df['P/L ($)'] = df['Current Value'] - df['Total Cost']
     df['P/L (%)'] = ((df['Current Value'] - df['Total Cost']) / df['Total Cost']) * 100
-
     st.dataframe(df, use_container_width=True)
 
     # ---- Sector Pie Chart ----
@@ -134,24 +195,21 @@ if st.session_state.portfolio:
 else:
     st.info("No active positions in portfolio.")
 
-# ---- Portfolio Value Over Time ----
+# ---- Portfolio Growth ----
 if st.session_state.portfolio:
     st.subheader("Simulated Portfolio Growth Over Time")
-
     all_dates = pd.date_range(
         start=min(pd.to_datetime([t['Date'] for t in st.session_state.portfolio])),
         end=datetime.date.today()
     )
     timeline_df = pd.DataFrame(index=all_dates)
     sector_map = {}
-
     for trade in st.session_state.portfolio:
         ticker = trade['Ticker']
         shares = trade['Shares']
         sector = trade.get('Sector', 'Unknown')
         sector_map[ticker] = sector
         buy_date = pd.to_datetime(trade['Date'])
-
         try:
             stock_data = yf.Ticker(ticker).history(start=buy_date, end=datetime.date.today())
             stock_data.index = stock_data.index.tz_localize(None)
@@ -160,12 +218,10 @@ if st.session_state.portfolio:
             timeline_df = timeline_df.join(stock_data, how='outer')
         except:
             continue
-
     timeline_df.ffill(inplace=True)
     timeline_df.fillna(0, inplace=True)
     timeline_df['Total Value'] = timeline_df.sum(axis=1)
 
-    # Plot with Plotly for better interactivity
     traces = []
     sector_colors = {}
     color_palette = px.colors.qualitative.Set1
@@ -187,30 +243,11 @@ if st.session_state.history:
 else:
     st.info("No trades made yet.")
 
-ticker_list = list({trade['Ticker'] for trade in st.session_state.portfolio})
-unique_tickers = sorted({trade['Ticker'] for trade in st.session_state.portfolio})
-tickerlist_ =  ",".join(unique_tickers)
-print(tickerlist_)
-
-
-
-# -------------------------------------------------------------------------------------
-# -------------------------------------------------------------------------------------
-# -------------------------------------------------------------------------------------
-# -------------------------------------------------------------------------------------
-# -------------------------------------------------------------------------------------
-# -------------------------------------------------------------------------------------
-# -------------------------------------------------------------------------------------
-# -------------------------------------------------------------------------------------
-
-
-
-# --- API Keys ---
-genai.configure(api_key="AIzaSyAynCQmdF8R100ZSsqftcTJojKEfr1QFck")
+# --- API Keys & Analysis Setup ---
+genai.configure(api_key="AIzaSyAZA2aZfWN-P6-3w6Oq7QOMGh99bxswD3o")
 model = genai.GenerativeModel("gemini-1.5-pro")
 NEWS_API_KEY = "c7a2cdbd13d440839be331c12ddaef91"
 
-# --- Calculate RSI ---
 def compute_rsi(series, period=14):
     delta = series.diff()
     gain = delta.where(delta > 0, 0)
@@ -220,7 +257,6 @@ def compute_rsi(series, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-# --- Fetch stock + indicators ---
 def get_stock_data(ticker):
     end = date.today()
     start = end - timedelta(days=180)
@@ -230,7 +266,6 @@ def get_stock_data(ticker):
     df['Signal'] = df['MACD'].ewm(span=9).mean()
     return df
 
-# --- Fetch news ---
 def fetch_news(ticker):
     url = f"https://newsapi.org/v2/everything?q={ticker}&apiKey={NEWS_API_KEY}&pageSize=5"
     try:
@@ -240,17 +275,15 @@ def fetch_news(ticker):
     except:
         return []
 
-# --- Build prompt ---
 def build_prompt(ticker, df, news_list):
     recent = df.dropna().iloc[-1]
     close = round(recent['Close'], 2)
     rsi = round(recent['RSI'], 2)
     macd = round(recent['MACD'], 2)
     signal = round(recent['Signal'], 2)
-
     news_str = "\n".join(news_list) if news_list else "No recent news found."
 
-    prompt = f"""
+    return f"""
 You are a financial research AI.
 
 Analyze the stock **{ticker}** using the following data:
@@ -273,9 +306,7 @@ Provide a professional 5-paragraph analysis with:
 - 🔮 Market Outlook: [Bullish/Bearish/Neutral]
 - 💡 Suggested Action: [HUGE BUY / BUY / HOLD / SELL]
 """
-    return prompt
 
-# --- Run Research for Single Stock ---
 def generate_stock_research(ticker):
     df = get_stock_data(ticker)
     news = fetch_news(ticker)
@@ -283,45 +314,38 @@ def generate_stock_research(ticker):
     response = model.generate_content(prompt)
     return response.text
 
-# --- PDF Generator ---
-# --- PDF Section for Streamlit ---
-import unicodedata
-
+# ---- PDF Builder ----
 class PDF(FPDF):
     def header(self):
         self.set_font("Arial", "B", 16)
         self.cell(0, 10, "AI Stock Research Report", ln=True, align="C")
         self.ln(5)
-
     def footer(self):
         self.set_y(-15)
         self.set_font("Arial", "I", 10)
         self.cell(0, 10, f"Page {self.page_no()}", align="C")
-
     def add_report(self, ticker, content):
         self.set_font("Arial", "B", 14)
         self.cell(0, 10, f"{ticker} Report", ln=True)
         self.ln(2)
         self.set_font("Arial", "", 12)
-
         safe_content = unicodedata.normalize('NFKD', content).encode('ascii', 'ignore').decode('ascii')
-
         for line in safe_content.split("\n"):
             self.multi_cell(0, 10, line)
         self.ln(5)
 
-# --- Generate and Export PDF from Streamlit ---
+# ---- Generate PDF and Email
 st.subheader("📄 Generate AI Stock Research PDF")
 generate_pdf = st.button("Generate Research PDF")
+ticker_list = sorted({trade['Ticker'] for trade in st.session_state.portfolio})
 
 if generate_pdf and ticker_list:
     try:
-        tickers = sorted(list(set(ticker_list)))
         pdf = PDF()
         pdf.set_auto_page_break(auto=True, margin=15)
         pdf.add_page()
 
-        for ticker in tickers:
+        for ticker in ticker_list:
             with st.spinner(f"Generating report for {ticker}..."):
                 try:
                     report = generate_stock_research(ticker)
@@ -329,7 +353,6 @@ if generate_pdf and ticker_list:
                 except Exception as e:
                     pdf.add_report(ticker, f"Error generating report: {e}")
 
-        # Generate PDF as bytes
         pdf_bytes = pdf.output(dest='S').encode('latin1')
         pdf_buffer = io.BytesIO(pdf_bytes)
 
@@ -340,6 +363,50 @@ if generate_pdf and ticker_list:
             file_name="AI_Stock_Research_Report.pdf",
             mime="application/pdf"
         )
+
+        if st.session_state.email:
+            try:
+                sender_email = "orbittraderai@gmail.com"
+                receiver_email = st.session_state.email
+                password = "sjakhldknitnyasz"
+
+                subject = "📄 Your AI Stock Research PDF is Ready!"
+                body = """Hello,
+
+Your AI stock research report has been generated successfully.
+
+You can download it by revisiting your Streamlit app session and clicking the '📥 Download AI Stock Research PDF' button.
+
+Or you could download it here
+
+Thank you,
+OrbitTrader AI"""
+
+                msg = MIMEMultipart()
+                msg["From"] = sender_email
+                msg["To"] = receiver_email
+                msg["Subject"] = subject
+                from email.mime.base import MIMEBase
+                from email import encoders
+
+                msg.attach(MIMEText(body, "plain"))
+
+                # Attach PDF
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(pdf_bytes)
+                encoders.encode_base64(part)
+                part.add_header("Content-Disposition", f"attachment; filename=AI_Stock_Research_Report.pdf")
+                msg.attach(part)
+
+                # Send the email
+                with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                    server.login(sender_email, password)
+                    server.sendmail(sender_email, receiver_email, msg.as_string())
+
+
+                st.info(f"📤 Email sent to {receiver_email}")
+            except Exception as e:
+                st.warning(f"❌ Email failed: {e}")
 
     except Exception as e:
         st.error(f"PDF generation failed: {e}")
